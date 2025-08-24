@@ -9,7 +9,7 @@ from ...models.persona import Persona
 from ...models.user import User
 from ...schemas.persona import PersonaCreate, PersonaUpdate, PersonaResponse, PersonaList
 from ...schemas.common import PaginationParams
-from ..auth import get_current_user
+from .auth import get_current_user
 
 router = APIRouter()
 

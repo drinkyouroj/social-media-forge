@@ -1,4 +1,4 @@
-from celery import current_task
+from celery import shared_task
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -13,13 +13,35 @@ from ..database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
-# Initialize OpenAI client
-openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
+# Initialize OpenAI client only if API key is available
+openai_client = None
+if settings.openai_api_key:
+    openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
 
 
-@current_task.task(bind=True)
+@shared_task(bind=True)
 def generate_ideas_for_topic(self, topic_id: int):
     """Generate blog post ideas for a given topic using OpenAI"""
+    
+    # Check if OpenAI API key is configured
+    if not settings.openai_api_key:
+        error_msg = "OpenAI API key not configured. Please add OPENAI_API_KEY to your environment variables."
+        logger.error(error_msg)
+        self.update_state(
+            state="FAILURE",
+            meta={"error": error_msg}
+        )
+        raise ValueError(error_msg)
+    
+    if not openai_client:
+        error_msg = "OpenAI client not initialized. Please check your API key configuration."
+        logger.error(error_msg)
+        self.update_state(
+            state="FAILURE",
+            meta={"error": error_msg}
+        )
+        raise ValueError(error_msg)
+    
     try:
         # Update task status
         self.update_state(
@@ -44,7 +66,7 @@ def generate_ideas_for_topic(self, topic_id: int):
                 ideas = []
                 for i in range(10):
                     # Update progress
-                    current_task.update_state(
+                    self.update_state(
                         state="PROGRESS",
                         meta={"current": i + 1, "total": 10, "status": f"Generating idea {i + 1}/10..."}
                     )

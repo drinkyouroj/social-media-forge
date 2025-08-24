@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from typing import List
@@ -8,34 +8,36 @@ from ...database import get_db
 from ...models.research import Research
 from ...models.idea import Idea
 from ...models.user import User
+from ...models.topic import Topic
 from ...schemas.research import ResearchResponse, ResearchList, ResearchStartRequest
 from ...schemas.common import PaginationParams
-from ..auth import get_current_user
 from ...tasks.research import start_research_for_idea
+from .auth import get_current_user
 
 router = APIRouter()
 
 
-@router.post("/start", response_model=dict)
+@router.post("/start")
 async def start_research(
     research_request: ResearchStartRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Start research for an approved idea"""
-    # Get the idea
-    idea = await db.get(Idea, research_request.idea_id)
+    # Verify idea exists and belongs to user
+    idea = await db.execute(
+        select(Idea).join(Topic).where(
+            Idea.id == research_request.idea_id,
+            Topic.user_id == current_user.id
+        )
+    )
+    idea = idea.scalar_one_or_none()
     
     if not idea:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Idea not found"
-        )
-    
-    if idea.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to research this idea"
         )
     
     if not idea.is_approved:
@@ -57,17 +59,13 @@ async def start_research(
     # Create research record
     research = Research(
         idea_id=research_request.idea_id,
-        research_prompt=research_request.research_prompt or f"Research current events and trends related to: {idea.title}",
+        research_prompt=research_request.research_prompt,
         status="pending"
     )
     
     db.add(research)
     await db.commit()
     await db.refresh(research)
-    
-    # Update idea status
-    idea.status = "researching"
-    await db.commit()
     
     # Start background research task
     task = start_research_for_idea.delay(research.id)
@@ -76,7 +74,7 @@ async def start_research(
         "message": "Research started successfully",
         "research_id": research.id,
         "task_id": task.id,
-        "status": "processing"
+        "status": "pending"
     }
 
 
@@ -86,9 +84,11 @@ async def list_research(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """List research for the current user"""
-    # Build query - join with ideas to filter by user
-    query = select(Research).join(Idea).where(Idea.user_id == current_user.id)
+    """List research records for the current user"""
+    # Build query
+    query = select(Research).join(Idea).join(Topic).where(
+        Topic.user_id == current_user.id
+    )
     
     # Get total count
     count_query = select(func.count()).select_from(query.subquery())
@@ -99,10 +99,10 @@ async def list_research(
     
     # Execute query
     result = await db.execute(query)
-    research_list = result.scalars().all()
+    research_records = result.scalars().all()
     
     return ResearchList(
-        research=research_list,
+        research_records=research_records,
         total=total
     )
 
@@ -114,14 +114,13 @@ async def get_research(
     db: AsyncSession = Depends(get_db)
 ):
     """Get research details"""
-    # Get research with idea to check ownership
-    query = select(Research).join(Idea).where(
-        Research.id == research_id,
-        Idea.user_id == current_user.id
+    research = await db.execute(
+        select(Research).join(Idea).join(Topic).where(
+            Research.id == research_id,
+            Topic.user_id == current_user.id
+        )
     )
-    
-    result = await db.execute(query)
-    research = result.scalar_one_or_none()
+    research = research.scalar_one_or_none()
     
     if not research:
         raise HTTPException(
@@ -139,27 +138,32 @@ async def get_research_by_idea(
     db: AsyncSession = Depends(get_db)
 ):
     """Get research for a specific idea"""
-    # Verify idea ownership
-    idea = await db.get(Idea, idea_id)
-    if not idea or idea.user_id != current_user.id:
+    # Verify idea belongs to user
+    idea = await db.execute(
+        select(Idea).join(Topic).where(
+            Idea.id == idea_id,
+            Topic.user_id == current_user.id
+        )
+    )
+    if not idea.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Idea not found"
         )
     
-    # Get research for idea
+    # Get research
     research = await db.execute(
         select(Research).where(Research.idea_id == idea_id)
     )
-    research_obj = research.scalar_one_or_none()
+    research = research.scalar_one_or_none()
     
-    if not research_obj:
+    if not research:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Research not found for this idea"
         )
     
-    return research_obj
+    return research
 
 
 @router.get("/status/{research_id}")
@@ -169,14 +173,13 @@ async def get_research_status(
     db: AsyncSession = Depends(get_db)
 ):
     """Get research status and progress"""
-    # Get research with idea to check ownership
-    query = select(Research).join(Idea).where(
-        Research.id == research_id,
-        Idea.user_id == current_user.id
+    research = await db.execute(
+        select(Research).join(Idea).join(Topic).where(
+            Research.id == research_id,
+            Topic.user_id == current_user.id
+        )
     )
-    
-    result = await db.execute(query)
-    research = result.scalar_one_or_none()
+    research = research.scalar_one_or_none()
     
     if not research:
         raise HTTPException(
@@ -187,7 +190,7 @@ async def get_research_status(
     return {
         "research_id": research.id,
         "status": research.status,
-        "source_count": research.source_count,
+        "progress": research.progress if hasattr(research, 'progress') else None,
         "created_at": research.created_at,
         "updated_at": research.updated_at
     }

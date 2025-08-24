@@ -23,10 +23,10 @@ class Settings(BaseSettings):
     session_secret: str = "change-me-in-production"
     session_expire_hours: int = 24
     
-    # AI API Keys
-    openai_api_key: str
-    anthropic_api_key: str
-    freepik_api_key: str
+    # AI API Keys (made optional for development)
+    openai_api_key: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
+    freepik_api_key: Optional[str] = None
     
     # Admin user
     admin_email: str = "admin@example.com"

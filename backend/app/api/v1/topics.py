@@ -1,16 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from typing import List, Optional
+from typing import List
 from sqlalchemy.orm import selectinload
 
 from ...database import get_db
 from ...models.topic import Topic
 from ...models.user import User
 from ...schemas.topic import TopicCreate, TopicUpdate, TopicResponse, TopicList
-from ...schemas.common import PaginationParams, FilterParams
-from ..auth import get_current_user
+from ...schemas.common import PaginationParams
 from ...tasks.idea_generation import generate_ideas_for_topic
+from .auth import get_current_user
 
 router = APIRouter()
 
@@ -37,33 +37,12 @@ async def create_topic(
 @router.get("/", response_model=TopicList)
 async def list_topics(
     pagination: PaginationParams = Depends(),
-    filters: FilterParams = Depends(),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """List topics with filtering and pagination"""
+    """List topics for the current user"""
     # Build query
     query = select(Topic).where(Topic.user_id == current_user.id)
-    
-    # Apply filters
-    if filters.search:
-        search_term = f"%{filters.search}%"
-        query = query.where(
-            (Topic.title.ilike(search_term)) |
-            (Topic.description.ilike(search_term))
-        )
-    
-    if filters.status:
-        query = query.where(Topic.status == filters.status)
-    
-    if filters.category:
-        query = query.where(Topic.category == filters.category)
-    
-    if filters.date_from:
-        query = query.where(Topic.created_at >= filters.date_from)
-    
-    if filters.date_to:
-        query = query.where(Topic.created_at <= filters.date_to)
     
     # Get total count
     count_query = select(func.count()).select_from(query.subquery())
@@ -166,12 +145,14 @@ async def delete_topic(
 
 
 @router.post("/{topic_id}/generate-ideas")
-async def generate_ideas(
+async def generate_ideas_for_topic_endpoint(
     topic_id: int,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Generate ideas for a topic using AI"""
+    """Generate blog post ideas for a topic"""
+    # Verify topic exists and belongs to user
     topic = await db.get(Topic, topic_id)
     
     if not topic:
@@ -187,7 +168,7 @@ async def generate_ideas(
         )
     
     # Update topic status
-    topic.status = "processing"
+    topic.status = "generating_ideas"
     await db.commit()
     
     # Start background task
@@ -196,5 +177,5 @@ async def generate_ideas(
     return {
         "message": "Idea generation started",
         "task_id": task.id,
-        "status": "processing"
+        "status": "generating_ideas"
     }
